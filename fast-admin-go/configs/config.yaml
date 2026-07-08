@@ -1,0 +1,32 @@
+server:
+  port: 8080
+  mode: debug # debug/release/test
+
+log:
+  level: info
+  path: "" # 留空只输出到 stdout
+
+database:
+  primary: mysql
+  sources:
+    mysql:
+      driver: mysql
+      dsn: "root:root@tcp(127.0.0.1:3306)/fast_admin?charset=utf8mb4&parseTime=True&loc=Local"
+      max_open_conns: 50
+      max_idle_conns: 10
+      conn_max_life_mins: 30
+
+redis:
+  addr: "127.0.0.1:6379"
+  password: ""
+  db: 0
+
+auth:
+  token_header: "Authorization"
+  token_ttl_hours: 12
+  token_prefix: "fast-admin"
+
+upload:
+  driver: local
+  local:
+    dir: "./uploads"
