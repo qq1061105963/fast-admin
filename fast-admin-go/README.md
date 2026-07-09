@@ -2,9 +2,15 @@
 
 fast-admin 后端的 Go 重写。已完整覆盖登录认证 + `system` 下的全部功能模块
 （user/role/menu/permission/online/dept/dict/config/file/job/log），对应 Java 侧的
-`fast-framework` + `fast-system`。AI（fast-ai）和工作流（fast-flow）模块不在本次范围内，
-建议保留 Java 服务、Go 侧通过 REST/gRPC 调用（原因见根目录对话记录：两个生态都没有
-成熟的 BPMN 引擎/不如 Spring AI 成熟）。
+`fast-framework` + `fast-system`；**AI 助手模块（fast-ai）也已完整复刻**为
+`internal/modules/ai/**`（config/model/tool/rag/mcp/agent + settings），单二进制内直连，
+不再依赖 Java 服务。工作流（fast-flow）模块仍不在本次范围内（两个 Go 生态都没有成熟的
+BPMN 引擎），建议保留 Java 服务、Go 侧通过 REST/gRPC 调用。
+
+AI 侧不再依赖 Spring AI：聊天走手写的流式 + 工具调用循环（`agent/llm.go`），直连
+Anthropic Messages / OpenAI Chat Completions；MCP 用官方 Go SDK
+（`github.com/modelcontextprotocol/go-sdk`）；RAG 的 embedding/Qdrant 都是裸 HTTP，
+文档抽取用 `excelize` + 内置 zip/xml 解析。
 
 直接复用现有的 `scripts/sql/fast_admin_init.sql` 建表，**不做 AutoMigrate**——Go 侧
 模型字段和现有表结构一一对应，启动时按现有 schema 连接即可，不会尝试改表。
@@ -45,6 +51,14 @@ internal/modules/
   fileconfig/   存储配置管理（密钥脱敏、编辑合并、激活切换）
   job/          定时任务：robfig/cron 调度器 + bean 注册表 + 执行日志
   syslog/       操作日志 + 登录日志的落库与查询
+  ai/           AI 助手模块（复刻 fast-ai），下列子包共用 settings 读写 sys_config 的 ai.* 参数
+    settings/   ai.* 运行期配置（助手开关/系统提示词/SQL 工具开关/RAG/MCP 等）的强类型读写
+    config/     /ai/config 聚合配置读写（含密钥脱敏），对应 AiConfigController
+    model/      ai_model_config CRUD + 连通性探测（fetch-models/test）+ 激活/启用
+    tool/       ai_tool_config CRUD + SQL/HTTP 执行器（命名参数/行限制/敏感列脱敏）+ 内置工具 Spec
+    rag/        知识库/文档/切片 CRUD + embedding + Qdrant + 文档抽取 + 切片 + 召回 + 异步索引
+    mcp/        ai_mcp_server CRUD + 客户端管理器（stdio/sse/streamable-http）+ inspect + 保活
+    agent/      对话 SSE + 手写工具调用循环（Anthropic/OpenAI）+ 历史 + 二次确认 + 审计 + 用量统计
 internal/bootstrap/             组装全部模块 + 路由注册，对应启动类
 ```
 
@@ -80,3 +94,11 @@ go run ./cmd/server -env dev
 - FTP/SFTP 驱动走通了基本上传/下载/删除，没有覆盖所有边缘情况（比如断点续传）
 - 代码生成器（读 information_schema 生成六件套）未实现
 - 演示模式拦截器（`DemoModeInterceptor`）未迁移，如需只读演示环境要自己加一个全局中间件
+- AI 文档抽取支持 txt/md/csv/json/xml/html/yml、docx、pptx、xls/xlsx；旧版二进制 doc/ppt
+  （OLE 复合文档）Go 侧无成熟解析库，暂不支持，会明确提示另存为新格式后再上传
+- AI 的 `execute_sql` 因 Java 侧受演示模式约束，Go 侧未迁移演示模式，等价于 `demo.enabled=false`；
+  执行前的用户二次确认仍保留（`/ai/agent/confirm/:token`）
+- MCP 保活在 Go 侧用内部 ticker 实现（按各 SSE 服务的间隔 ping），不再往 `sys_job` 写保活任务；
+  `ai_mcp_server.keep_alive_job_id` 因此保持为空
+- MCP streamable-http 直接用官方 Go SDK，未实现 Java 侧的「SDK 失败再退化为手写 JSON-RPC」兜底
+- 多轮工具调用的 token 用量取最后一轮（与 Java 取最后一帧 usage 的行为一致，跨轮不累加）

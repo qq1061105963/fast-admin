@@ -43,6 +43,12 @@ func NewService(repo *Repository, configRepo *fileconfig.Repository, factory *st
 	return &Service{repo: repo, configRepo: configRepo, factory: factory, checkers: checkers}
 }
 
+// AddChecker 在 bootstrap 里由后续初始化的模块（如 AI 知识库）回填引用检查器，
+// 让被引用的源文件无法在文件管理里直接删除。
+func (s *Service) AddChecker(checker ReferenceChecker) {
+	s.checkers = append(s.checkers, checker)
+}
+
 func (s *Service) Page(ctx context.Context, q Query) ([]File, int64, error) {
 	list, total, err := s.repo.Page(ctx, q)
 	if err != nil {

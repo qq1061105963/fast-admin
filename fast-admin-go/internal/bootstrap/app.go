@@ -18,6 +18,13 @@ import (
 	"github.com/SirYuxuan/fast-admin-go/internal/framework/logger"
 	"github.com/SirYuxuan/fast-admin-go/internal/framework/middleware"
 
+	aiagent "github.com/SirYuxuan/fast-admin-go/internal/modules/ai/agent"
+	aiconfig "github.com/SirYuxuan/fast-admin-go/internal/modules/ai/config"
+	aimcp "github.com/SirYuxuan/fast-admin-go/internal/modules/ai/mcp"
+	aimodel "github.com/SirYuxuan/fast-admin-go/internal/modules/ai/model"
+	airag "github.com/SirYuxuan/fast-admin-go/internal/modules/ai/rag"
+	aisettings "github.com/SirYuxuan/fast-admin-go/internal/modules/ai/settings"
+	aitool "github.com/SirYuxuan/fast-admin-go/internal/modules/ai/tool"
 	"github.com/SirYuxuan/fast-admin-go/internal/modules/authn"
 	sysconfig "github.com/SirYuxuan/fast-admin-go/internal/modules/config"
 	"github.com/SirYuxuan/fast-admin-go/internal/modules/dept"
@@ -42,6 +49,7 @@ type App struct {
 	router    *gin.Engine
 	server    *http.Server
 	scheduler *job.Scheduler
+	mcpMgr    *aimcp.Manager
 }
 
 // New 按顺序初始化 logger -> database -> redis -> auth -> 各业务模块 -> router。
@@ -122,11 +130,35 @@ func New(configDir, env string) (*App, error) {
 		return nil, fmt.Errorf("bootstrap scheduled jobs: %w", err)
 	}
 
+	// ---- AI 模块（fast-ai 的 Go 复刻）：settings -> model/tool/rag/mcp -> agent ----
+	aiSettings := aisettings.New(aisettings.NewStore(db))
+	aiConfigSvc := aiconfig.NewService(aiSettings)
+
+	aiModelSvc := aimodel.NewService(aimodel.NewRepository(db))
+
+	aiToolRepo := aitool.NewRepository(db)
+	aiToolSvc := aitool.NewService(aiToolRepo, aiSettings)
+	aiToolExec := aitool.NewExecutor(aiToolRepo, db)
+
+	aiRagSvc := airag.NewService(airag.NewRepository(db), airag.NewEmbedding(aiSettings),
+		airag.NewQdrant(aiSettings), aiSettings, fileSvc)
+	fileSvc.AddChecker(aiRagSvc) // 知识库引用的源文件禁止在文件管理里直接删除
+
+	aiMcpSvc := aimcp.NewService(aimcp.NewRepository(db))
+	aiMcpMgr := aimcp.NewManager(aiMcpSvc, aiSettings)
+	aiConfigSvc.SetMCPReloader(aiMcpMgr)
+	go aiMcpMgr.Reload() // 异步初始化 MCP 连接，失败不阻塞启动
+
+	aiAgentRepo := aiagent.NewRepository(db)
+	aiAgentSvc := aiagent.NewService(aiSettings, aiModelSvc, aiToolSvc, aiToolExec, aiMcpMgr, aiRagSvc,
+		aiagent.NewHistoryService(aiAgentRepo, aiSettings), aiagent.NewConfirmationService(),
+		aiagent.NewAuditLogger(aiAgentRepo), aiagent.NewStatsService(aiAgentRepo))
+
 	gin.SetMode(modeOrDefault(cfg.Server.Mode))
 	router := gin.New()
 	router.Use(middleware.TraceID(), middleware.Recovery(), middleware.RequestLogger(), middleware.CORS())
 
-	app := &App{cfg: cfg, db: dbManager, rdb: rdb, tokens: tokenService, router: router, scheduler: scheduler}
+	app := &App{cfg: cfg, db: dbManager, rdb: rdb, tokens: tokenService, router: router, scheduler: scheduler, mcpMgr: aiMcpMgr}
 
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
@@ -148,6 +180,14 @@ func New(configDir, env string) (*App, error) {
 	file.RegisterRoutes(protected, file.NewHandler(fileSvc), opWriter)
 	job.RegisterRoutes(protected, job.NewHandler(jobSvc), opWriter)
 	syslog.RegisterRoutes(protected, syslog.NewHandler(logSvc))
+
+	// ---- AI 模块路由 ----
+	aiconfig.RegisterRoutes(protected, aiconfig.NewHandler(aiConfigSvc), opWriter)
+	aimodel.RegisterRoutes(protected, aimodel.NewHandler(aiModelSvc), opWriter)
+	aitool.RegisterRoutes(protected, aitool.NewHandler(aiToolSvc), opWriter)
+	airag.RegisterRoutes(protected, airag.NewHandler(aiRagSvc), opWriter)
+	aimcp.RegisterRoutes(protected, aimcp.NewHandler(aiMcpSvc, aiMcpMgr), opWriter)
+	aiagent.RegisterRoutes(protected, aiagent.NewHandler(aiAgentSvc, aiAgentRepo))
 
 	app.server = &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
@@ -198,6 +238,9 @@ func (a *App) Run(ctx context.Context) error {
 		return fmt.Errorf("shutdown http server: %w", err)
 	}
 	a.scheduler.Stop()
+	if a.mcpMgr != nil {
+		a.mcpMgr.Close()
+	}
 	if err := a.db.Close(); err != nil {
 		return fmt.Errorf("close database: %w", err)
 	}
